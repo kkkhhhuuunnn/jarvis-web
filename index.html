@@ -67,7 +67,7 @@
   </div>
 
   <div class="status-bar">
-    <div id="memoryStatus">엔진: 문맥 기반 정밀 음성 보정 활성화</div>
+    <div id="memoryStatus">엔진: 자비스 정밀 음향 & 음성 모델 가동 중</div>
     <span onclick="resetAllMemory()">⚠️ 기억 초기화</span>
   </div>
 
@@ -91,13 +91,39 @@
     let recognition = null;
     let isRecording = false;
     let silenceTimer = null;
+    let selectedVoice = null;
+
+    // 자주 왜곡되는 고유명사/학술용어 발음 교정 테이블
+    const PHONETIC_DICTIONARY = [
+      { regex: /재미\s*난\s*일|재미\s*나이|재미\s*난\s*이|재미\s*나/gi, replace: "제미나이" },
+      { regex: /오픈\s*에이\s*아이|오픈\s*에이|오픈\s*애이/gi, replace: "오픈AI" },
+      { regex: /챗\s*지\s*피\s*티|첫\s*지피티/gi, replace: "ChatGPT" },
+      { regex: /보안\s*수학|보안\s*함수/gi, replace: "도함수" },
+      { regex: /자\s*비\s*스|자\s*비스/gi, replace: "자비스" },
+      { regex: /행복\s*좋\s*되/gi, replace: "행복주택" }
+    ];
 
     window.onload = () => {
       document.getElementById('groqKey').value = localStorage.getItem('jarvis_groq_key') || '';
       loadMemoryFromStorage();
       renderChatLogs();
       initSTT();
+      initTTSVoice();
     };
+
+    // 최적의 남성 보이스 탐색 (자비스 느낌 연출)
+    function initTTSVoice() {
+      if (!window.speechSynthesis) return;
+      const updateVoices = () => {
+        const voices = window.speechSynthesis.getVoices();
+        // 한국어 음성 중 남성 톤을 우선 검색
+        selectedVoice = voices.find(v => v.lang.includes('ko') && (v.name.includes('Male') || v.name.includes('InJoon') || v.name.includes('남성')))
+                     || voices.find(v => v.lang.includes('ko')) 
+                     || null;
+      };
+      updateVoices();
+      window.speechSynthesis.onvoiceschanged = updateVoices;
+    }
 
     function saveKey() {
       const key = document.getElementById('groqKey').value.trim();
@@ -118,7 +144,7 @@
         saveLogsToStorage();
       } else {
         chatHistory = [
-          { role: 'assistant', content: "Systems online, Sir. 음성 정밀 교정 서브루틴이 준비되었습니다. 말씀하십시오.", timestamp: now }
+          { role: 'assistant', content: "Systems online, Sir. 자비스 프로토콜이 정상 가동 중입니다. 말씀하십시오.", timestamp: now }
         ];
       }
     }
@@ -154,6 +180,7 @@
       }
     }
 
+    // 대화용 모델만 필터링 (가드레일/검사용 모델 제외)
     async function getAvailableModel(apiKey) {
       if (cachedModel) return cachedModel;
       try {
@@ -162,19 +189,30 @@
         });
         const data = await res.json();
         if (data.data && data.data.length > 0) {
-          const models = data.data.map(m => m.id);
-          const preferred = models.find(m => m.includes("llama-3") || m.includes("gemma") || m.includes("mixtral"));
-          cachedModel = preferred || models[0];
+          const textModels = data.data
+            .map(m => m.id)
+            .filter(id => !id.includes("guard") && !id.includes("whisper") && !id.includes("moderation"));
+
+          const preferred = textModels.find(m => m.includes("llama-3.1-8b") || m.includes("llama-3.3") || m.includes("mixtral") || m.includes("gemma"));
+          cachedModel = preferred || textModels[0];
           document.getElementById('memoryStatus').innerText = `연결 모델: ${cachedModel}`;
           return cachedModel;
         }
       } catch (e) {
-        console.error("모델 목록 로드 실패", e);
+        console.error("모델 목록 조회 실패", e);
       }
-      return "mixtral-8x7b-32768";
+      return "llama-3.1-8b-instant";
     }
 
-    // 1. 개선된 음성 인식 (말을 끝낼 때까지 여유 대기 후 전송)
+    // 1차: 사전 기반 음소 교정
+    function applyDictionaryCorrection(text) {
+      let corrected = text;
+      PHONETIC_DICTIONARY.forEach(item => {
+        corrected = corrected.replace(item.regex, item.replace);
+      });
+      return corrected;
+    }
+
     function initSTT() {
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (!SR) return;
@@ -183,7 +221,7 @@
       recognition.lang = 'ko-KR';
       recognition.continuous = true;
       recognition.interimResults = true;
-      recognition.maxAlternatives = 3; // 여러 후보를 평가
+      recognition.maxAlternatives = 3;
 
       let transcriptAccumulator = '';
 
@@ -196,21 +234,23 @@
             interim += e.results[i][0].transcript;
           }
         }
-        document.getElementById('userInput').value = (transcriptAccumulator + ' ' + interim).trim();
+        
+        let fullText = (transcriptAccumulator + ' ' + interim).trim();
+        // 실시간으로 발음 교정 적용
+        document.getElementById('userInput').value = applyDictionaryCorrection(fullText);
 
-        // 1.2초간 추가 발화가 없으면 문장이 끝난 것으로 간주하고 정밀 전송
         clearTimeout(silenceTimer);
         silenceTimer = setTimeout(() => {
           if (isRecording && document.getElementById('userInput').value.trim()) {
             stopMic();
             send();
           }
-        }, 1200);
+        }, 1100);
       };
 
       recognition.onerror = () => stopMicUI();
       recognition.onend = () => {
-        if (isRecording) recognition.start(); // 강제 종료 방지
+        if (isRecording) recognition.start();
       };
     }
 
@@ -226,7 +266,7 @@
     }
 
     function toggleMic() {
-      if (!recognition) return alert('음성 인식을 지원하지 않는 브라우저입니다. PC 크롬 브라우저를 사용해주세요.');
+      if (!recognition) return alert('PC 크롬 브라우저를 사용해주세요.');
       if (isRecording) {
         stopMic();
       } else {
@@ -241,80 +281,37 @@
       }
     }
 
-    // 2. 발음 오인식/전문용어 왜곡 실시간 교정기
-    async function correctAcousticErrors(apiKey, model, rawText) {
-      // 3단어 이하의 단순 인사는 불필요한 교정 루프 생략
-      if (rawText.length < 5 || ["안녕", "반가워", "누구야", "몇 시야"].includes(rawText.trim())) {
-        return rawText;
-      }
-
-      const prompt = `당신은 한국어 음성인식(STT) 오류 교정기입니다. 사용자의 음성인식 원문에서 발음 유사성으로 인해 잘못 변환된 학술용어(수학, 과학, 경제, 철학 등) 및 어색한 표현을 자연스럽고 올바른 문맥으로 바로잡아 교정된 문장만 출력하십시오.
-예시:
-- "보안 수학2부는 뭐야" -> "도함수와 수학2는 뭐야"
-- "행복 좋되" -> "행복주택"
-- "자비 쓰" -> "자비스"
-
-원문: "${rawText}"
-교정문:`;
-
-      try {
-        const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${apiKey}`
-          },
-          body: JSON.stringify({
-            model: model,
-            messages: [{ role: 'user', content: prompt }],
-            temperature: 0.1,
-            max_tokens: 60
-          })
-        });
-        const data = await res.json();
-        if (data.choices && data.choices[0]) {
-          const corrected = data.choices[0].message.content.trim().replace(/^["']|["']$/g, '');
-          return corrected;
-        }
-      } catch (e) {
-        console.warn("보정기 건너뜀", e);
-      }
-      return rawText;
-    }
-
-    // 3. 자비스 처리 및 응답 전송
     async function send() {
       const input = document.getElementById('userInput');
-      const rawText = input.value.trim();
+      let text = input.value.trim();
       const apiKey = localStorage.getItem('jarvis_groq_key');
 
-      if (!rawText) return;
-      if (!apiKey) return alert('Groq API Key (gsk_...)를 입력하고 저장을 눌러주세요.');
+      if (!text) return;
+      if (!apiKey) return alert('Groq API Key를 입력하고 저장을 눌러주세요.');
 
-      input.value = '문맥 분석 중...';
+      // 1차 단어장 교정 재확인
+      text = applyDictionaryCorrection(text);
+
+      const now = new Date().getTime();
+      appendMsgToDOM('user', text);
+      input.value = '';
+
+      chatHistory.push({ role: 'user', content: text, timestamp: now });
+
+      const systemInstruction = `당신은 마블의 AI 비서 '자비스(J.A.R.V.I.S.)'입니다.
+- 주인님을 항상 'Sir' 또는 '주인님'으로 정중하게 부르십시오.
+- 영국식 집사처럼 차분하고, 논리적이며, 위트 있는 지적인 어조를 유지하십시오.
+- 음성 대화용이므로 1~2문장으로 아주 짤막하고 명확하게 한국어로 응답하십시오.
+- 사용자가 질문 중 기술 용어(제미나이, 오픈AI 등)를 언급하면 맥락을 파악하여 정확하게 답변하십시오.
+- [기억 데이터]: ${userProfileMemory}`;
+
+      const messagesPayload = [
+        { role: 'system', content: systemInstruction },
+        ...chatHistory.slice(-8).map(m => ({ role: m.role, content: m.content }))
+      ];
 
       try {
         const activeModel = await getAvailableModel(apiKey);
-        
-        // STT 발음 오류를 문맥에 맞게 보정
-        const text = await correctAcousticErrors(apiKey, activeModel, rawText);
-        input.value = '';
-
-        const now = new Date().getTime();
-        appendMsgToDOM('user', text);
-
-        chatHistory.push({ role: 'user', content: text, timestamp: now });
-
-        const systemInstruction = `당신은 마블의 AI 비서 '자비스(J.A.R.V.I.S.)'입니다.
-- 주인님을 항상 'Sir' 또는 '주인님'으로 부르십시오.
-- 영국식 집사처럼 차분하고 품격 있는 어조로 답하십시오.
-- 음성 대화용이므로 1~2문장으로 아주 짤막하고 명확하게 한국어로 응답하십시오.
-- [기억 데이터]: ${userProfileMemory}`;
-
-        const messagesPayload = [
-          { role: 'system', content: systemInstruction },
-          ...chatHistory.slice(-8).map(m => ({ role: m.role, content: m.content }))
-        ];
 
         const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
           method: "POST",
@@ -325,7 +322,7 @@
           body: JSON.stringify({
             model: activeModel,
             messages: messagesPayload,
-            temperature: 0.6,
+            temperature: 0.5,
             max_tokens: 150
           })
         });
@@ -343,7 +340,6 @@
 
       } catch (err) {
         appendMsgToDOM('error', `오류 안내: ${err.message}`);
-        input.value = '';
       }
     }
 
@@ -372,14 +368,18 @@
       } catch (e) {}
     }
 
+    // 아이언맨 자비스(폴 베타니) 느낌의 중저음 신사 톤 음향 튜닝
     function speakJarvis(text) {
       if (!window.speechSynthesis) return;
       window.speechSynthesis.cancel();
 
       const utter = new SpeechSynthesisUtterance(text);
+      if (selectedVoice) utter.voice = selectedVoice;
       utter.lang = 'ko-KR';
-      utter.pitch = 0.85;
-      utter.rate = 1.05;
+
+      // 폴 베타니 특유의 절제되고 낮은 피치와 일정한 호흡
+      utter.pitch = 0.78; // 기존 0.85보다 더 중후하게 내려 자비스 느낌 강화
+      utter.rate = 0.98;  // 너무 빠르지 않고 신사답게 조율
 
       const reactor = document.getElementById('reactor');
       reactor.classList.add('speaking');
