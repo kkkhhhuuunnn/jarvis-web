@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>J.A.R.V.I.S. - Auto Model Engine</title>
+  <title>J.A.R.V.I.S. - Precision Audio Engine</title>
   <style>
     :root { --bg: #050811; --cyan: #00f0ff; --dim-cyan: rgba(0, 240, 255, 0.2); }
     body {
@@ -67,7 +67,7 @@
   </div>
 
   <div class="status-bar">
-    <div id="memoryStatus">엔진: 최적 모델 자동 탐색 모드</div>
+    <div id="memoryStatus">엔진: 문맥 기반 정밀 음성 보정 활성화</div>
     <span onclick="resetAllMemory()">⚠️ 기억 초기화</span>
   </div>
 
@@ -90,6 +90,7 @@
     let userProfileMemory = "";
     let recognition = null;
     let isRecording = false;
+    let silenceTimer = null;
 
     window.onload = () => {
       document.getElementById('groqKey').value = localStorage.getItem('jarvis_groq_key') || '';
@@ -117,7 +118,7 @@
         saveLogsToStorage();
       } else {
         chatHistory = [
-          { role: 'assistant', content: "Systems online, Sir. 초고속 반응 엔진이 연결되었습니다. 말씀하십시오.", timestamp: now }
+          { role: 'assistant', content: "Systems online, Sir. 음성 정밀 교정 서브루틴이 준비되었습니다. 말씀하십시오.", timestamp: now }
         ];
       }
     }
@@ -153,7 +154,6 @@
       }
     }
 
-    // 내 계정에서 실제로 호출 가능한 텍스트 모델을 API로부터 직접 획득
     async function getAvailableModel(apiKey) {
       if (cachedModel) return cachedModel;
       try {
@@ -162,7 +162,6 @@
         });
         const data = await res.json();
         if (data.data && data.data.length > 0) {
-          // 대화형 텍스트 생성 모델 중 선호 모델 탐색
           const models = data.data.map(m => m.id);
           const preferred = models.find(m => m.includes("llama-3") || m.includes("gemma") || m.includes("mixtral"));
           cachedModel = preferred || models[0];
@@ -172,36 +171,53 @@
       } catch (e) {
         console.error("모델 목록 로드 실패", e);
       }
-      return "mixtral-8x7b-32768"; // 예비용
+      return "mixtral-8x7b-32768";
     }
 
+    // 1. 개선된 음성 인식 (말을 끝낼 때까지 여유 대기 후 전송)
     function initSTT() {
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (!SR) return;
 
       recognition = new SR();
       recognition.lang = 'ko-KR';
-      recognition.continuous = false;
+      recognition.continuous = true;
       recognition.interimResults = true;
-      recognition.maxAlternatives = 1;
+      recognition.maxAlternatives = 3; // 여러 후보를 평가
+
+      let transcriptAccumulator = '';
 
       recognition.onresult = (e) => {
-        let finalTranscript = '';
+        let interim = '';
         for (let i = e.resultIndex; i < e.results.length; ++i) {
           if (e.results[i].isFinal) {
-            finalTranscript += e.results[i][0].transcript;
+            transcriptAccumulator += ' ' + e.results[i][0].transcript;
           } else {
-            document.getElementById('userInput').value = e.results[i][0].transcript;
+            interim += e.results[i][0].transcript;
           }
         }
-        if (finalTranscript) {
-          document.getElementById('userInput').value = finalTranscript.trim();
-          send();
-        }
+        document.getElementById('userInput').value = (transcriptAccumulator + ' ' + interim).trim();
+
+        // 1.2초간 추가 발화가 없으면 문장이 끝난 것으로 간주하고 정밀 전송
+        clearTimeout(silenceTimer);
+        silenceTimer = setTimeout(() => {
+          if (isRecording && document.getElementById('userInput').value.trim()) {
+            stopMic();
+            send();
+          }
+        }, 1200);
       };
 
       recognition.onerror = () => stopMicUI();
-      recognition.onend = () => stopMicUI();
+      recognition.onend = () => {
+        if (isRecording) recognition.start(); // 강제 종료 방지
+      };
+    }
+
+    function stopMic() {
+      clearTimeout(silenceTimer);
+      if (recognition) recognition.stop();
+      stopMicUI();
     }
 
     function stopMicUI() {
@@ -212,10 +228,10 @@
     function toggleMic() {
       if (!recognition) return alert('음성 인식을 지원하지 않는 브라우저입니다. PC 크롬 브라우저를 사용해주세요.');
       if (isRecording) {
-        recognition.stop();
-        stopMicUI();
+        stopMic();
       } else {
         try {
+          document.getElementById('userInput').value = '';
           recognition.start();
           isRecording = true;
           document.getElementById('micBtn').classList.add('active');
@@ -225,33 +241,80 @@
       }
     }
 
+    // 2. 발음 오인식/전문용어 왜곡 실시간 교정기
+    async function correctAcousticErrors(apiKey, model, rawText) {
+      // 3단어 이하의 단순 인사는 불필요한 교정 루프 생략
+      if (rawText.length < 5 || ["안녕", "반가워", "누구야", "몇 시야"].includes(rawText.trim())) {
+        return rawText;
+      }
+
+      const prompt = `당신은 한국어 음성인식(STT) 오류 교정기입니다. 사용자의 음성인식 원문에서 발음 유사성으로 인해 잘못 변환된 학술용어(수학, 과학, 경제, 철학 등) 및 어색한 표현을 자연스럽고 올바른 문맥으로 바로잡아 교정된 문장만 출력하십시오.
+예시:
+- "보안 수학2부는 뭐야" -> "도함수와 수학2는 뭐야"
+- "행복 좋되" -> "행복주택"
+- "자비 쓰" -> "자비스"
+
+원문: "${rawText}"
+교정문:`;
+
+      try {
+        const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${apiKey}`
+          },
+          body: JSON.stringify({
+            model: model,
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0.1,
+            max_tokens: 60
+          })
+        });
+        const data = await res.json();
+        if (data.choices && data.choices[0]) {
+          const corrected = data.choices[0].message.content.trim().replace(/^["']|["']$/g, '');
+          return corrected;
+        }
+      } catch (e) {
+        console.warn("보정기 건너뜀", e);
+      }
+      return rawText;
+    }
+
+    // 3. 자비스 처리 및 응답 전송
     async function send() {
       const input = document.getElementById('userInput');
-      const text = input.value.trim();
+      const rawText = input.value.trim();
       const apiKey = localStorage.getItem('jarvis_groq_key');
 
-      if (!text) return;
+      if (!rawText) return;
       if (!apiKey) return alert('Groq API Key (gsk_...)를 입력하고 저장을 눌러주세요.');
 
-      const now = new Date().getTime();
-      appendMsgToDOM('user', text);
-      input.value = '';
-
-      chatHistory.push({ role: 'user', content: text, timestamp: now });
-
-      const systemInstruction = `당신은 마블의 AI 비서 '자비스(J.A.R.V.I.S.)'입니다.
-- 주인님을 항상 'Sir' 또는 '주인님'으로 부르십시오.
-- 영국식 집사처럼 차분하고 품격 있는 어조로 답하십시오.
-- 음성 대화를 위해 반드시 1~2문장으로 아주 짤막하고 명확하게 한국어로 응답하십시오.
-- [기억 데이터]: ${userProfileMemory}`;
-
-      const messagesPayload = [
-        { role: 'system', content: systemInstruction },
-        ...chatHistory.slice(-8).map(m => ({ role: m.role, content: m.content }))
-      ];
+      input.value = '문맥 분석 중...';
 
       try {
         const activeModel = await getAvailableModel(apiKey);
+        
+        // STT 발음 오류를 문맥에 맞게 보정
+        const text = await correctAcousticErrors(apiKey, activeModel, rawText);
+        input.value = '';
+
+        const now = new Date().getTime();
+        appendMsgToDOM('user', text);
+
+        chatHistory.push({ role: 'user', content: text, timestamp: now });
+
+        const systemInstruction = `당신은 마블의 AI 비서 '자비스(J.A.R.V.I.S.)'입니다.
+- 주인님을 항상 'Sir' 또는 '주인님'으로 부르십시오.
+- 영국식 집사처럼 차분하고 품격 있는 어조로 답하십시오.
+- 음성 대화용이므로 1~2문장으로 아주 짤막하고 명확하게 한국어로 응답하십시오.
+- [기억 데이터]: ${userProfileMemory}`;
+
+        const messagesPayload = [
+          { role: 'system', content: systemInstruction },
+          ...chatHistory.slice(-8).map(m => ({ role: m.role, content: m.content }))
+        ];
 
         const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
           method: "POST",
@@ -280,6 +343,7 @@
 
       } catch (err) {
         appendMsgToDOM('error', `오류 안내: ${err.message}`);
+        input.value = '';
       }
     }
 
