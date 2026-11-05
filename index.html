@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>J.A.R.V.I.S. - Memory Engine</title>
+  <style>
+    :root { --bg: #050811; --cyan: #00f0ff; --dim-cyan: rgba(0, 240, 255, 0.2); }
+    body {
+      margin: 0; background: var(--bg); color: var(--cyan);
+      font-family: 'Segoe UI', -apple-system, sans-serif;
+      display: flex; flex-direction: column; align-items: center; min-height: 100vh;
+    }
+    .config-bar {
+      width: 90%; max-width: 650px; margin-top: 15px; padding: 10px;
+      border: 1px solid var(--dim-cyan); border-radius: 8px; display: flex; gap: 8px;
+    }
+    .config-bar input {
+      flex: 1; background: transparent; border: 1px solid var(--dim-cyan);
+      color: var(--cyan); padding: 8px; border-radius: 4px; font-size: 13px;
+    }
+    .config-bar button {
+      background: var(--cyan); color: #000; border: none; padding: 8px 14px;
+      border-radius: 4px; cursor: pointer; font-weight: bold;
+    }
+    /* 메모리 상태 표시 바 */
+    .status-bar {
+      width: 90%; max-width: 650px; margin-top: 8px; font-size: 12px;
+      display: flex; justify-content: space-between; color: rgba(0, 240, 255, 0.7);
+    }
+    .status-bar span { cursor: pointer; text-decoration: underline; }
+    .reactor-container { margin: 15px 0 10px; }
+    .reactor {
+      width: 110px; height: 110px; border-radius: 50%;
+      border: 2px dashed var(--cyan); box-shadow: 0 0 20px var(--cyan);
+      animation: rotate 10s linear infinite;
+    }
+    .reactor.speaking { animation: pulse 0.8s infinite alternate, rotate 3s linear infinite; }
+    @keyframes rotate { 100% { transform: rotate(360deg); } }
+    @keyframes pulse { to { box-shadow: 0 0 45px var(--cyan), inset 0 0 20px var(--cyan); } }
+    .terminal {
+      width: 90%; max-width: 650px; height: 380px; border: 1px solid var(--dim-cyan);
+      border-radius: 8px; padding: 15px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
+      box-sizing: border-box; background: rgba(0, 10, 20, 0.5); font-size: 14px;
+    }
+    .msg { padding: 8px 12px; border-radius: 6px; max-width: 80%; }
+    .msg.user { align-self: flex-end; background: rgba(0, 240, 255, 0.15); border: 1px solid var(--cyan); }
+    .msg.jarvis { align-self: flex-start; background: rgba(255, 255, 255, 0.05); border-left: 3px solid var(--cyan); }
+    .controls { width: 90%; max-width: 650px; margin: 15px 0 25px; display: flex; gap: 10px; }
+    .controls input {
+      flex: 1; padding: 12px; background: transparent; border: 1px solid var(--dim-cyan);
+      border-radius: 6px; color: #fff; outline: none;
+    }
+    .controls button {
+      background: transparent; border: 1px solid var(--cyan); color: var(--cyan);
+      padding: 0 16px; border-radius: 6px; cursor: pointer; font-weight: bold;
+    }
+    .controls button:hover { background: var(--cyan); color: #000; }
+    .controls button.active { background: #ff3366; border-color: #ff3366; color: #fff; }
+  </style>
+</head>
+<body>
+
+  <div class="config-bar">
+    <input type="password" id="geminiKey" placeholder="Gemini API Key를 입력하세요">
+    <button onclick="saveKey()">저장</button>
+  </div>
+
+  <div class="status-bar">
+    <div id="memoryStatus">기억 보존 상태: 최신화됨 (30일 보존 모드)</div>
+    <span onclick="resetAllMemory()">⚠️ 기억 초기화</span>
+  </div>
+
+  <div class="reactor-container">
+    <div class="reactor" id="reactor"></div>
+  </div>
+
+  <div class="terminal" id="chat"></div>
+
+  <div class="controls">
+    <input type="text" id="userInput" placeholder="지시를 내리거나 마이크 버튼을 누르십시오..." onkeydown="if(event.key==='Enter') send()">
+    <button onclick="send()">전송</button>
+    <button id="micBtn" onclick="toggleMic()">🎤 음성</button>
+  </div>
+
+  <script>
+    const RETENTION_DAYS = 30; // 보존 기간 (30일)
+    let chatHistory = [];
+    let userProfileMemory = ""; // 자비스가 학습한 사용자 특성 요약본
+    let recognition = null;
+    let isRecording = false;
+
+    window.onload = () => {
+      document.getElementById('geminiKey').value = localStorage.getItem('jarvis_gemini_key') || '';
+      loadMemoryFromStorage();
+      renderChatLogs();
+      initSTT();
+    };
+
+    function saveKey() {
+      localStorage.setItem('jarvis_gemini_key', document.getElementById('geminiKey').value.trim());
+      alert('Gemini 키가 저장되었습니다.');
+    }
+
+    // 1. 메모리 로드 및 30일 지난 오래된 데이터 자동 정리
+    function loadMemoryFromStorage() {
+      const now = new Date().getTime();
+      const rawLogs = localStorage.getItem('jarvis_chat_logs');
+      userProfileMemory = localStorage.getItem('jarvis_user_profile') || "사용자에 대해 아직 알려진 세부 정보가 없습니다.";
+
+      if (rawLogs) {
+        const parsed = JSON.parse(rawLogs);
+        // 30일 이내의 로그만 필터링
+        const limitMs = RETENTION_DAYS * 24 * 60 * 60 * 1000;
+        chatHistory = parsed.filter(item => (now - item.timestamp) < limitMs);
+        saveLogsToStorage();
+      } else {
+        chatHistory = [
+          { role: 'model', parts: [{ text: "Systems online, Sir. 모든 기억 프로토콜이 정상 가동 중입니다." }], timestamp: now }
+        ];
+      }
+    }
+
+    function saveLogsToStorage() {
+      localStorage.setItem('jarvis_chat_logs', JSON.stringify(chatHistory));
+      localStorage.setItem('jarvis_user_profile', userProfileMemory);
+    }
+
+    function renderChatLogs() {
+      const chat = document.getElementById('chat');
+      chat.innerHTML = '';
+      chatHistory.forEach(item => {
+        appendMsgToDOM(item.role === 'user' ? 'user' : 'jarvis', item.parts[0].text);
+      });
+    }
+
+    function appendMsgToDOM(role, text) {
+      const chat = document.getElementById('chat');
+      const div = document.createElement('div');
+      div.className = `msg ${role}`;
+      div.innerText = text;
+      chat.appendChild(div);
+      chat.scrollTop = chat.scrollHeight;
+    }
+
+    function resetAllMemory() {
+      if (confirm("지난 30일간의 모든 대화 기록과 자비스의 기억을 완전히 삭제하시겠습니까?")) {
+        localStorage.removeItem('jarvis_chat_logs');
+        localStorage.removeItem('jarvis_user_profile');
+        chatHistory = [];
+        userProfileMemory = "정보 없음";
+        location.reload();
+      }
+    }
+
+    // 2. 음성 인식 (STT)
+    function initSTT() {
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SR) return;
+      recognition = new SR();
+      recognition.lang = 'ko-KR';
+      recognition.onresult = (e) => {
+        document.getElementById('userInput').value = e.results[0][0].transcript;
+        send();
+      };
+      recognition.onend = () => {
+        isRecording = false;
+        document.getElementById('micBtn').classList.remove('active');
+      };
+    }
+
+    function toggleMic() {
+      if (!recognition) return alert('크롬 브라우저를 권장합니다.');
+      if (isRecording) {
+        recognition.stop();
+      } else {
+        recognition.start();
+        isRecording = true;
+        document.getElementById('micBtn').classList.add('active');
+      }
+    }
+
+    // 3. 자비스 전송 및 상호작용
+    async function send() {
+      const input = document.getElementById('userInput');
+      const text = input.value.trim();
+      const apiKey = localStorage.getItem('jarvis_gemini_key');
+
+      if (!text) return;
+      if (!apiKey) return alert('Gemini API Key를 상단에 입력하고 저장해주세요.');
+
+      const now = new Date().getTime();
+      appendMsgToDOM('user', text);
+      input.value = '';
+
+      chatHistory.push({ role: 'user', parts: [{ text }], timestamp: now });
+
+      // 시스템 프롬프트: 사용자에 대해 누적된 프로필 메모리를 항상 장착
+      const systemInstruction = `당신은 마블의 AI 비서 '자비스(J.A.R.V.I.S.)'입니다.
+- 사용자를 항상 'Sir' 또는 '주인님'으로 극진히 대우하십시오.
+- 간결하고 침착한 영국식 집사 어조를 유지하며 음성 출력을 위해 1~2문장으로 핵심만 답변하십시오.
+- [현재까지 파악된 사용자에 대한 장기 기억 데이터]:
+${userProfileMemory}
+위 기억을 바탕으로 사용자의 취향, 상황, 이전 언급 사항을 자연스럽게 반영하여 서포트하십시오.`;
+
+      // API 호출용 직전 대화 (최근 10개만 전달해 속도 최적화)
+      const recentContents = chatHistory.slice(-10).map(item => ({
+        role: item.role,
+        parts: item.parts
+      }));
+
+      try {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: systemInstruction }] },
+            contents: recentContents
+          })
+        });
+
+        const data = await res.json();
+        const reply = data.candidates[0].content.parts[0].text;
+
+        appendMsgToDOM('jarvis', reply);
+        chatHistory.push({ role: 'model', parts: [{ text: reply }], timestamp: new Date().getTime() });
+        saveLogsToStorage();
+
+        speakJarvis(reply);
+
+        // 비동기로 사용자에 대한 핵심 학습/요약 메모리 업데이트
+        updateJarvisMemory(apiKey);
+
+      } catch (err) {
+        appendMsgToDOM('jarvis', '메모리 서브루틴 연산 중 오류가 발생했습니다, Sir.');
+      }
+    }
+
+    // 4. 자비스의 자가 학습(Memory Extraction) 서브루틴
+    async function updateJarvisMemory(apiKey) {
+      // 최근 4회 대화에서 사용자의 신상, 선호, 목표, 일정 등 중요한 정보만 추출해 누적 프로필 생성
+      const recentSlice = chatHistory.slice(-4).map(i => `${i.role}: ${i.parts[0].text}`).join("\n");
+      const memoryPrompt = `다음 대화에서 사용자에 대해 새로 밝혀진 핵심 사실(직업/목표/취향/상황 등)을 추출하여, 기존 프로필과 통합해 불릿포인트 3~5줄로 업데이트해줘. 사담은 버리고 장기 기억할 가치 있는 정보만 남겨.
+[기존 프로필]:
+${userProfileMemory}
+
+[최근 대화]:
+${recentSlice}`;
+
+      try {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: memoryPrompt }] }]
+          })
+        });
+        const d = await res.json();
+        userProfileMemory = d.candidates[0].content.parts[0].text.trim();
+        saveLogsToStorage();
+      } catch (e) {
+        // 백그라운드 학습 실패 시 무시
+      }
+    }
+
+    // 5. 음성 합성
+    function speakJarvis(text) {
+      if (!window.speechSynthesis) return;
+      window.speechSynthesis.cancel();
+
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.lang = 'ko-KR';
+      utter.pitch = 0.85;
+      utter.rate = 1.0;
+
+      const reactor = document.getElementById('reactor');
+      reactor.classList.add('speaking');
+      utter.onend = () => reactor.classList.remove('speaking');
+      utter.onerror = () => reactor.classList.remove('speaking');
+
+      window.speechSynthesis.speak(utter);
+    }
+  </script>
+</body>
+</html>
