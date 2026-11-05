@@ -152,15 +152,15 @@
       }
     }
 
-    // 1. 음성 인식(STT) 정확도 향상 로직
+    // 음성 인식 (STT)
     function initSTT() {
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (!SR) return;
 
       recognition = new SR();
       recognition.lang = 'ko-KR';
-      recognition.continuous = false;      // 말 끝나면 자동으로 마무리
-      recognition.interimResults = true;    // 말하는 도중 실시간 반영
+      recognition.continuous = false;
+      recognition.interimResults = true;
       recognition.maxAlternatives = 1;
 
       recognition.onresult = (e) => {
@@ -178,14 +178,8 @@
         }
       };
 
-      recognition.onerror = (e) => {
-        console.error('STT 에러:', e.error);
-        stopMicUI();
-      };
-
-      recognition.onend = () => {
-        stopMicUI();
-      };
+      recognition.onerror = () => stopMicUI();
+      recognition.onend = () => stopMicUI();
     }
 
     function stopMicUI() {
@@ -209,7 +203,7 @@
       }
     }
 
-    // 2. 대화 전송 및 API 호출 (가장 안정적인 gemini-1.5-flash 적용)
+    // Google API 호출: 모델명 및 엔드포인트 수정
     async function send() {
       const input = document.getElementById('userInput');
       const text = input.value.trim();
@@ -225,21 +219,19 @@
       chatHistory.push({ role: 'user', parts: [{ text }], timestamp: now });
 
       const systemInstruction = `당신은 마블의 AI 비서 '자비스(J.A.R.V.I.S.)'입니다.
-- 주인님을 'Sir' 또는 '주인님'으로 극진히 부르십시오.
-- 간결하고 침착한 영국식 집사 말투를 쓰며, 음성 출력을 위해 반드시 1~2문장으로 짧게 요약해 답하십시오.
-- [사용자에 대한 장기 기억 데이터]:
-${userProfileMemory}
-위 기억을 반영해 대화하십시오.`;
+- 주인님을 'Sir' 또는 '주인님'으로 부르십시오.
+- 간결하고 침착한 영국식 집사 말투를 쓰며, 음성 출력을 위해 1~2문장으로 짧게 요약해 답하십시오.
+- [기억 데이터]:
+${userProfileMemory}`;
 
-      // 직전 6개 대화만 전달해 안정성 극대화
       const recentContents = chatHistory.slice(-6).map(item => ({
         role: item.role,
         parts: item.parts
       }));
 
       try {
-        // v1beta의 가장 표준적인 gemini-1.5-flash 모델 엔드포인트 사용
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+        // v1 정식 엔드포인트 + gemini-2.5-flash 표준 호출
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -250,9 +242,8 @@ ${userProfileMemory}
 
         const data = await res.json();
 
-        // 구글 API 에러 발생 시 구체적인 이유 출력
         if (data.error) {
-          throw new Error(data.error.message || 'API 호출 에러');
+          throw new Error(data.error.message || 'API 통신 오류');
         }
 
         const reply = data.candidates[0].content.parts[0].text;
@@ -262,8 +253,6 @@ ${userProfileMemory}
         saveLogsToStorage();
 
         speakJarvis(reply);
-
-        // 백그라운드 학습 트리거
         updateJarvisMemory(apiKey);
 
       } catch (err) {
@@ -271,7 +260,6 @@ ${userProfileMemory}
       }
     }
 
-    // 3. 백그라운드 메모리 요약
     async function updateJarvisMemory(apiKey) {
       const recentSlice = chatHistory.slice(-4).map(i => `${i.role}: ${i.parts[0].text}`).join("\n");
       const memoryPrompt = `다음 대화에서 사용자의 신상, 선호, 목표 등 기억할 만한 사실만 간추려 기존 프로필과 합쳐 3줄 이내로 정리해줘.
@@ -279,7 +267,7 @@ ${userProfileMemory}
 [최근 대화]: ${recentSlice}`;
 
       try {
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -291,19 +279,16 @@ ${userProfileMemory}
           userProfileMemory = d.candidates[0].content.parts[0].text.trim();
           saveLogsToStorage();
         }
-      } catch (e) {
-        // 백그라운드 작업은 실패해도 조용히 넘어감
-      }
+      } catch (e) {}
     }
 
-    // 4. TTS 음성 출력
     function speakJarvis(text) {
       if (!window.speechSynthesis) return;
       window.speechSynthesis.cancel();
 
       const utter = new SpeechSynthesisUtterance(text);
       utter.lang = 'ko-KR';
-      utter.pitch = 0.85; // 차분한 중저음
+      utter.pitch = 0.85;
       utter.rate = 1.0;
 
       const reactor = document.getElementById('reactor');
