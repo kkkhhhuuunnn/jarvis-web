@@ -85,7 +85,8 @@
 
   <script>
     const RETENTION_DAYS = 30;
-    const MODEL_NAME = "gemini-3.8-flash"; // 최신 권장 모델 반영
+    // 과부하 시 순차적으로 시도할 대체 모델 목록
+    const FALLBACK_MODELS = ["gemini-3.8-flash", "gemini-pro"];
     let chatHistory = [];
     let userProfileMemory = "";
     let recognition = null;
@@ -203,6 +204,39 @@
       }
     }
 
+    // 서버 호출 및 자동 우회 함수
+    async function requestGeminiWithFallback(apiKey, bodyPayload) {
+      let lastError = null;
+
+      for (const model of FALLBACK_MODELS) {
+        try {
+          const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(bodyPayload)
+          });
+
+          const data = await res.json();
+          if (data.error) {
+            // 과부하(high demand) 또는 503일 경우 다음 모델로 자동 우회
+            if (data.error.message && (data.error.message.includes('high demand') || data.error.code === 503)) {
+              console.warn(`${model} 과부하 감지, 대체 모델로 전환합니다.`);
+              lastError = new Error(data.error.message);
+              continue;
+            }
+            throw new Error(data.error.message);
+          }
+
+          if (data.candidates && data.candidates[0]) {
+            return data.candidates[0].content.parts[0].text;
+          }
+        } catch (err) {
+          lastError = err;
+        }
+      }
+      throw lastError || new Error("서버 응답 지연");
+    }
+
     async function send() {
       const input = document.getElementById('userInput');
       const text = input.value.trim();
@@ -229,22 +263,10 @@ ${userProfileMemory}`;
       }));
 
       try {
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${apiKey}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            systemInstruction: { parts: [{ text: systemInstruction }] },
-            contents: recentContents
-          })
+        const reply = await requestGeminiWithFallback(apiKey, {
+          systemInstruction: { parts: [{ text: systemInstruction }] },
+          contents: recentContents
         });
-
-        const data = await res.json();
-
-        if (data.error) {
-          throw new Error(data.error.message || 'API 통신 오류');
-        }
-
-        const reply = data.candidates[0].content.parts[0].text;
 
         appendMsgToDOM('jarvis', reply);
         chatHistory.push({ role: 'model', parts: [{ text: reply }], timestamp: new Date().getTime() });
@@ -254,7 +276,7 @@ ${userProfileMemory}`;
         updateJarvisMemory(apiKey);
 
       } catch (err) {
-        appendMsgToDOM('error', `오류 안내: ${err.message}`);
+        appendMsgToDOM('error', `일시적 트래픽 집중: 1~2초 후 다시 입력해주세요. (${err.message})`);
       }
     }
 
@@ -265,16 +287,11 @@ ${userProfileMemory}`;
 [최근 대화]: ${recentSlice}`;
 
       try {
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${apiKey}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ role: 'user', parts: [{ text: memoryPrompt }] }]
-          })
+        const text = await requestGeminiWithFallback(apiKey, {
+          contents: [{ role: 'user', parts: [{ text: memoryPrompt }] }]
         });
-        const d = await res.json();
-        if (d.candidates && d.candidates[0]) {
-          userProfileMemory = d.candidates[0].content.parts[0].text.trim();
+        if (text) {
+          userProfileMemory = text.trim();
           saveLogsToStorage();
         }
       } catch (e) {}
