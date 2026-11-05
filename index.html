@@ -23,7 +23,6 @@
       background: var(--cyan); color: #000; border: none; padding: 8px 14px;
       border-radius: 4px; cursor: pointer; font-weight: bold;
     }
-    /* 메모리 상태 표시 바 */
     .status-bar {
       width: 90%; max-width: 650px; margin-top: 8px; font-size: 12px;
       display: flex; justify-content: space-between; color: rgba(0, 240, 255, 0.7);
@@ -46,6 +45,7 @@
     .msg { padding: 8px 12px; border-radius: 6px; max-width: 80%; }
     .msg.user { align-self: flex-end; background: rgba(0, 240, 255, 0.15); border: 1px solid var(--cyan); }
     .msg.jarvis { align-self: flex-start; background: rgba(255, 255, 255, 0.05); border-left: 3px solid var(--cyan); }
+    .msg.error { align-self: flex-start; background: rgba(255, 50, 50, 0.1); border-left: 3px solid #ff3333; color: #ff8888; }
     .controls { width: 90%; max-width: 650px; margin: 15px 0 25px; display: flex; gap: 10px; }
     .controls input {
       flex: 1; padding: 12px; background: transparent; border: 1px solid var(--dim-cyan);
@@ -56,7 +56,7 @@
       padding: 0 16px; border-radius: 6px; cursor: pointer; font-weight: bold;
     }
     .controls button:hover { background: var(--cyan); color: #000; }
-    .controls button.active { background: #ff3366; border-color: #ff3366; color: #fff; }
+    .controls button.active { background: #ff3366 !important; border-color: #ff3366 !important; color: #fff !important; }
   </style>
 </head>
 <body>
@@ -67,7 +67,7 @@
   </div>
 
   <div class="status-bar">
-    <div id="memoryStatus">기억 보존 상태: 최신화됨 (30일 보존 모드)</div>
+    <div id="memoryStatus">상태: 30일 보존 모드 가동 중</div>
     <span onclick="resetAllMemory()">⚠️ 기억 초기화</span>
   </div>
 
@@ -84,9 +84,9 @@
   </div>
 
   <script>
-    const RETENTION_DAYS = 30; // 보존 기간 (30일)
+    const RETENTION_DAYS = 30;
     let chatHistory = [];
-    let userProfileMemory = ""; // 자비스가 학습한 사용자 특성 요약본
+    let userProfileMemory = "";
     let recognition = null;
     let isRecording = false;
 
@@ -98,19 +98,18 @@
     };
 
     function saveKey() {
-      localStorage.setItem('jarvis_gemini_key', document.getElementById('geminiKey').value.trim());
+      const key = document.getElementById('geminiKey').value.trim();
+      localStorage.setItem('jarvis_gemini_key', key);
       alert('Gemini 키가 저장되었습니다.');
     }
 
-    // 1. 메모리 로드 및 30일 지난 오래된 데이터 자동 정리
     function loadMemoryFromStorage() {
       const now = new Date().getTime();
       const rawLogs = localStorage.getItem('jarvis_chat_logs');
-      userProfileMemory = localStorage.getItem('jarvis_user_profile') || "사용자에 대해 아직 알려진 세부 정보가 없습니다.";
+      userProfileMemory = localStorage.getItem('jarvis_user_profile') || "사용자에 대해 아직 수집된 세부 정보가 없습니다.";
 
       if (rawLogs) {
         const parsed = JSON.parse(rawLogs);
-        // 30일 이내의 로그만 필터링
         const limitMs = RETENTION_DAYS * 24 * 60 * 60 * 1000;
         chatHistory = parsed.filter(item => (now - item.timestamp) < limitMs);
         saveLogsToStorage();
@@ -144,50 +143,80 @@
     }
 
     function resetAllMemory() {
-      if (confirm("지난 30일간의 모든 대화 기록과 자비스의 기억을 완전히 삭제하시겠습니까?")) {
+      if (confirm("지난 30일간의 모든 대화 기록과 기억을 완전히 삭제하시겠습니까?")) {
         localStorage.removeItem('jarvis_chat_logs');
         localStorage.removeItem('jarvis_user_profile');
         chatHistory = [];
-        userProfileMemory = "정보 없음";
+        userProfileMemory = "";
         location.reload();
       }
     }
 
-    // 2. 음성 인식 (STT)
+    // 1. 음성 인식(STT) 정확도 향상 로직
     function initSTT() {
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (!SR) return;
+
       recognition = new SR();
       recognition.lang = 'ko-KR';
+      recognition.continuous = false;      // 말 끝나면 자동으로 마무리
+      recognition.interimResults = true;    // 말하는 도중 실시간 반영
+      recognition.maxAlternatives = 1;
+
       recognition.onresult = (e) => {
-        document.getElementById('userInput').value = e.results[0][0].transcript;
-        send();
+        let finalTranscript = '';
+        for (let i = e.resultIndex; i < e.results.length; ++i) {
+          if (e.results[i].isFinal) {
+            finalTranscript += e.results[i][0].transcript;
+          } else {
+            document.getElementById('userInput').value = e.results[i][0].transcript;
+          }
+        }
+        if (finalTranscript) {
+          document.getElementById('userInput').value = finalTranscript.trim();
+          send();
+        }
       };
+
+      recognition.onerror = (e) => {
+        console.error('STT 에러:', e.error);
+        stopMicUI();
+      };
+
       recognition.onend = () => {
-        isRecording = false;
-        document.getElementById('micBtn').classList.remove('active');
+        stopMicUI();
       };
+    }
+
+    function stopMicUI() {
+      isRecording = false;
+      document.getElementById('micBtn').classList.remove('active');
     }
 
     function toggleMic() {
-      if (!recognition) return alert('크롬 브라우저를 권장합니다.');
+      if (!recognition) return alert('음성 인식을 지원하지 않는 브라우저입니다. PC 크롬 브라우저를 사용해주세요.');
       if (isRecording) {
         recognition.stop();
+        stopMicUI();
       } else {
-        recognition.start();
-        isRecording = true;
-        document.getElementById('micBtn').classList.add('active');
+        try {
+          recognition.start();
+          isRecording = true;
+          document.getElementById('micBtn').classList.add('active');
+        } catch (e) {
+          stopMicUI();
+        }
       }
     }
 
-    // 3. 자비스 전송 및 상호작용
+    // 2. 대화 전송 및 API 호출 (가장 안정적인 gemini-1.5-flash 적용)
     async function send() {
       const input = document.getElementById('userInput');
       const text = input.value.trim();
       const apiKey = localStorage.getItem('jarvis_gemini_key');
 
       if (!text) return;
-      if (!apiKey) return alert('Gemini API Key를 상단에 입력하고 저장해주세요.');
+      if (!apiKey) return alert('상단에 Gemini API Key를 입력하고 저장을 눌러주세요.');
 
       const now = new Date().getTime();
       appendMsgToDOM('user', text);
@@ -195,22 +224,22 @@
 
       chatHistory.push({ role: 'user', parts: [{ text }], timestamp: now });
 
-      // 시스템 프롬프트: 사용자에 대해 누적된 프로필 메모리를 항상 장착
       const systemInstruction = `당신은 마블의 AI 비서 '자비스(J.A.R.V.I.S.)'입니다.
-- 사용자를 항상 'Sir' 또는 '주인님'으로 극진히 대우하십시오.
-- 간결하고 침착한 영국식 집사 어조를 유지하며 음성 출력을 위해 1~2문장으로 핵심만 답변하십시오.
-- [현재까지 파악된 사용자에 대한 장기 기억 데이터]:
+- 주인님을 'Sir' 또는 '주인님'으로 극진히 부르십시오.
+- 간결하고 침착한 영국식 집사 말투를 쓰며, 음성 출력을 위해 반드시 1~2문장으로 짧게 요약해 답하십시오.
+- [사용자에 대한 장기 기억 데이터]:
 ${userProfileMemory}
-위 기억을 바탕으로 사용자의 취향, 상황, 이전 언급 사항을 자연스럽게 반영하여 서포트하십시오.`;
+위 기억을 반영해 대화하십시오.`;
 
-      // API 호출용 직전 대화 (최근 10개만 전달해 속도 최적화)
-      const recentContents = chatHistory.slice(-10).map(item => ({
+      // 직전 6개 대화만 전달해 안정성 극대화
+      const recentContents = chatHistory.slice(-6).map(item => ({
         role: item.role,
         parts: item.parts
       }));
 
       try {
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+        // v1beta의 가장 표준적인 gemini-1.5-flash 모델 엔드포인트 사용
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -220,6 +249,12 @@ ${userProfileMemory}
         });
 
         const data = await res.json();
+
+        // 구글 API 에러 발생 시 구체적인 이유 출력
+        if (data.error) {
+          throw new Error(data.error.message || 'API 호출 에러');
+        }
+
         const reply = data.candidates[0].content.parts[0].text;
 
         appendMsgToDOM('jarvis', reply);
@@ -228,27 +263,23 @@ ${userProfileMemory}
 
         speakJarvis(reply);
 
-        // 비동기로 사용자에 대한 핵심 학습/요약 메모리 업데이트
+        // 백그라운드 학습 트리거
         updateJarvisMemory(apiKey);
 
       } catch (err) {
-        appendMsgToDOM('jarvis', '메모리 서브루틴 연산 중 오류가 발생했습니다, Sir.');
+        appendMsgToDOM('error', `오류 안내: ${err.message}`);
       }
     }
 
-    // 4. 자비스의 자가 학습(Memory Extraction) 서브루틴
+    // 3. 백그라운드 메모리 요약
     async function updateJarvisMemory(apiKey) {
-      // 최근 4회 대화에서 사용자의 신상, 선호, 목표, 일정 등 중요한 정보만 추출해 누적 프로필 생성
       const recentSlice = chatHistory.slice(-4).map(i => `${i.role}: ${i.parts[0].text}`).join("\n");
-      const memoryPrompt = `다음 대화에서 사용자에 대해 새로 밝혀진 핵심 사실(직업/목표/취향/상황 등)을 추출하여, 기존 프로필과 통합해 불릿포인트 3~5줄로 업데이트해줘. 사담은 버리고 장기 기억할 가치 있는 정보만 남겨.
-[기존 프로필]:
-${userProfileMemory}
-
-[최근 대화]:
-${recentSlice}`;
+      const memoryPrompt = `다음 대화에서 사용자의 신상, 선호, 목표 등 기억할 만한 사실만 간추려 기존 프로필과 합쳐 3줄 이내로 정리해줘.
+[기존 프로필]: ${userProfileMemory}
+[최근 대화]: ${recentSlice}`;
 
       try {
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -256,21 +287,23 @@ ${recentSlice}`;
           })
         });
         const d = await res.json();
-        userProfileMemory = d.candidates[0].content.parts[0].text.trim();
-        saveLogsToStorage();
+        if (d.candidates && d.candidates[0]) {
+          userProfileMemory = d.candidates[0].content.parts[0].text.trim();
+          saveLogsToStorage();
+        }
       } catch (e) {
-        // 백그라운드 학습 실패 시 무시
+        // 백그라운드 작업은 실패해도 조용히 넘어감
       }
     }
 
-    // 5. 음성 합성
+    // 4. TTS 음성 출력
     function speakJarvis(text) {
       if (!window.speechSynthesis) return;
       window.speechSynthesis.cancel();
 
       const utter = new SpeechSynthesisUtterance(text);
       utter.lang = 'ko-KR';
-      utter.pitch = 0.85;
+      utter.pitch = 0.85; // 차분한 중저음
       utter.rate = 1.0;
 
       const reactor = document.getElementById('reactor');
