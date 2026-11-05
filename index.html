@@ -85,6 +85,7 @@
 
   <script>
     const RETENTION_DAYS = 30;
+    const MODEL_NAME = "gemini-3.8-flash"; // 최신 권장 모델 반영
     let chatHistory = [];
     let userProfileMemory = "";
     let recognition = null;
@@ -152,7 +153,6 @@
       }
     }
 
-    // 음성 인식 (STT)
     function initSTT() {
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (!SR) return;
@@ -203,7 +203,6 @@
       }
     }
 
-    // Google API 호출: 모델명 및 엔드포인트 수정
     async function send() {
       const input = document.getElementById('userInput');
       const text = input.value.trim();
@@ -230,8 +229,7 @@ ${userProfileMemory}`;
       }));
 
       try {
-        // v1 정식 엔드포인트 + gemini-2.5-flash 표준 호출
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${apiKey}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -267,7 +265,7 @@ ${userProfileMemory}`;
 [최근 대화]: ${recentSlice}`;
 
       try {
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${apiKey}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
